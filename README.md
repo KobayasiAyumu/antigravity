@@ -30,18 +30,6 @@ GitHubユーザーの活動・リポジトリ・言語使用率を美しく可�
 - **Google Fonts (Inter)** — モダンな日本語対応フォント
 - **Font Awesome 6** — アイコン
 
----
-
-## 🚀 GitHub Pagesで公開する方法
-
-1. このリポジトリをGitHubにPushする
-2. リポジトリページ → **Settings** → **Pages** を開く
-3. **Source** を `Deploy from a branch` に設定
-4. **Branch** を `main`、ディレクトリを `/(root)` に設定して **Save**
-5. 数分後に以下のURLでアクセス可能になる:
-   ```
-   https://<あなたのユーザー名>.github.io/<リポジトリ名>/github-stats-dashboard/
-   ```
 
 ---
 
