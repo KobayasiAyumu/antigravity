@@ -27,8 +27,188 @@ const GITHUB_API = 'https://api.github.com';
 // ============================================================
 // ステート管理
 // ============================================================
-/** 現在検索中のユーザー名を保持（再試行用） */
 let lastSearchedUsername = '';
+let _currentExportData = null; // エクスポート用データキャッシュ
+
+// ============================================================
+// テーマ管理
+// ============================================================
+const THEME_KEY = 'github-stats-theme';
+
+function loadTheme() {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved) return saved;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_KEY, theme);
+    const btn = document.getElementById('btn-theme');
+    if (btn) {
+        btn.innerHTML = theme === 'dark'
+            ? '<i class="fa-solid fa-moon"></i>'
+            : '<i class="fa-solid fa-sun"></i>';
+    }
+    // チャートのborderColorはCSS変数から読み取るため再描画は不要
+}
+
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+}
+
+// ============================================================
+// 検索履歴管理
+// ============================================================
+const HISTORY_KEY = 'github-stats-history';
+const MAX_HISTORY = 5;
+
+function loadHistory() {
+    try {
+        return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    } catch {
+        return [];
+    }
+}
+
+function saveHistory(username) {
+    const history = loadHistory().filter(h => h !== username);
+    history.unshift(username);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
+}
+
+function renderHistoryDropdown() {
+    const dropdown = document.getElementById('history-dropdown');
+    if (!dropdown) return;
+    const history = loadHistory();
+    if (history.length === 0) {
+        dropdown.classList.add('hidden');
+        return;
+    }
+    dropdown.innerHTML = history.map(u => `
+        <div class="history-item" data-user="${escapeHtml(u)}">
+            <i class="fa-solid fa-clock-rotate-left"></i>
+            <span>${escapeHtml(u)}</span>
+        </div>
+    `).join('');
+    dropdown.classList.remove('hidden');
+
+    dropdown.querySelectorAll('.history-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const user = item.dataset.user;
+            usernameInput.value = user;
+            dropdown.classList.add('hidden');
+            loadUserStats(user);
+        });
+    });
+}
+
+// ============================================================
+// インメモリAPIキャッシュ（セッション中5分TTL）
+// ============================================================
+const _apiCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
+
+function getCached(username) {
+    const entry = _apiCache.get(username.toLowerCase());
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > CACHE_TTL) {
+        _apiCache.delete(username.toLowerCase());
+        return null;
+    }
+    return entry.data;
+}
+
+function setCache(username, data) {
+    _apiCache.set(username.toLowerCase(), { data, timestamp: Date.now() });
+}
+
+// ============================================================
+// トースト通知
+// ============================================================
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `
+        <i class="fa-solid fa-${type === 'success' ? 'check' : type === 'error' ? 'xmark' : 'info'}"></i>
+        <span>${escapeHtml(message)}</span>
+    `;
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('toast-show'));
+    setTimeout(() => {
+        toast.classList.remove('toast-show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// ============================================================
+// URL共有
+// ============================================================
+function updatePageUrl(username) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('user', username);
+    history.replaceState({}, '', url.toString());
+}
+
+async function shareProfile() {
+    const username = lastSearchedUsername;
+    if (!username) return;
+    const shareUrl = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(username)}`;
+    if (navigator.share) {
+        try {
+            await navigator.share({ title: `${username} の GitHub Stats`, url: shareUrl });
+        } catch { /* キャンセル時は無視 */ }
+    } else {
+        try {
+            await navigator.clipboard.writeText(shareUrl);
+            showToast('URLをクリップボードにコピーしました');
+        } catch {
+            showToast('コピーに失敗しました', 'error');
+        }
+    }
+}
+
+// ============================================================
+// JSONエクスポート
+// ============================================================
+function exportJSON() {
+    if (!_currentExportData) return;
+    const payload = {
+        exportedAt: new Date().toISOString(),
+        user: _currentExportData.user,
+        stats: {
+            totalStars: calcTotalStars(_currentExportData.repos),
+            totalForks: calcTotalForks(_currentExportData.repos),
+            publicRepos: _currentExportData.user.public_repos,
+            followers: _currentExportData.user.followers,
+        },
+        topRepositories: _currentExportData.repos
+            .sort((a, b) => b.stargazers_count - a.stargazers_count)
+            .slice(0, 10)
+            .map(r => ({
+                name: r.name,
+                description: r.description,
+                stars: r.stargazers_count,
+                forks: r.forks_count,
+                language: r.language,
+                url: r.html_url,
+            })),
+        languages: _currentExportData.languages,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `github-stats-${lastSearchedUsername}-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('JSONエクスポート完了');
+}
 
 // ============================================================
 // イベントリスナー登録
@@ -36,7 +216,10 @@ let lastSearchedUsername = '';
 searchForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const username = usernameInput.value.trim();
-    if (username) loadUserStats(username);
+    if (username) {
+        document.getElementById('history-dropdown')?.classList.add('hidden');
+        loadUserStats(username);
+    }
 });
 
 retryBtn.addEventListener('click', () => {
@@ -46,6 +229,7 @@ retryBtn.addEventListener('click', () => {
 backBtn.addEventListener('click', () => {
     showSection('search');
     usernameInput.value = '';
+    history.replaceState({}, '', window.location.pathname);
     usernameInput.focus();
 });
 
@@ -57,13 +241,35 @@ quickBtns.forEach((btn) => {
     });
 });
 
+// 検索入力: フォーカス時に履歴表示
+usernameInput.addEventListener('focus', () => {
+    renderHistoryDropdown();
+});
+usernameInput.addEventListener('input', () => {
+    if (!usernameInput.value.trim()) {
+        renderHistoryDropdown();
+    } else {
+        document.getElementById('history-dropdown')?.classList.add('hidden');
+    }
+});
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-input-wrapper') && !e.target.closest('#history-dropdown')) {
+        document.getElementById('history-dropdown')?.classList.add('hidden');
+    }
+});
+
+// テーマボタン
+document.getElementById('btn-theme')?.addEventListener('click', toggleTheme);
+
+// シェアボタン
+document.getElementById('btn-share')?.addEventListener('click', shareProfile);
+
+// エクスポートボタン
+document.getElementById('btn-export')?.addEventListener('click', exportJSON);
+
 // ============================================================
 // 表示切替ヘルパー
 // ============================================================
-/**
- * 表示するセクションを切り替える
- * @param {'search'|'loading'|'error'|'dashboard'} section
- */
 function showSection(section) {
     searchSection.classList.add('hidden');
     loadingSection.classList.add('hidden');
@@ -76,11 +282,6 @@ function showSection(section) {
     if (section === 'dashboard') dashboard.classList.remove('hidden');
 }
 
-/**
- * エラー情報を設定して表示する
- * @param {string} title - エラータイトル
- * @param {string} message - エラーメッセージ
- */
 function showError(title, message) {
     errorTitle.textContent = title;
     errorMessage.textContent = message;
@@ -90,11 +291,6 @@ function showError(title, message) {
 // ============================================================
 // GitHub API リクエスト
 // ============================================================
-/**
- * GitHub APIからJSONデータを取得する
- * @param {string} endpoint - APIエンドポイント（/で始まる）
- * @returns {Promise<Object>} レスポンスJSON
- */
 async function fetchGitHubAPI(endpoint) {
     const res = await fetch(`${GITHUB_API}${endpoint}`, {
         headers: { Accept: 'application/vnd.github+json' },
@@ -108,11 +304,6 @@ async function fetchGitHubAPI(endpoint) {
     return res.json();
 }
 
-/**
- * ユーザーのリポジトリ一覧を全件取得する（ページネーション対応）
- * @param {string} username
- * @returns {Promise<Array>}
- */
 async function fetchAllRepositories(username) {
     const allRepos = [];
     let page = 1;
@@ -125,20 +316,12 @@ async function fetchAllRepositories(username) {
         allRepos.push(...repos);
         if (repos.length < perPage) break;
         page++;
-        // 最大5ページ（500件）まで取得
         if (page > 5) break;
     }
     return allRepos;
 }
 
-/**
- * 複数リポジトリの言語情報を並行取得して集計する
- * @param {string} username
- * @param {Array} repos
- * @returns {Promise<Object>} { 言語名: バイト数 }
- */
 async function fetchAggregatedLanguages(username, repos) {
-    // スター数上位10件のみ言語APIを叩く（レート制限対策）
     const targetRepos = [...repos]
         .sort((a, b) => b.stargazers_count - a.stargazers_count)
         .slice(0, 20);
@@ -162,32 +345,20 @@ async function fetchAggregatedLanguages(username, repos) {
 // ============================================================
 // データ集計ヘルパー
 // ============================================================
-/**
- * リポジトリ配列から総スター数を計算する
- */
 function calcTotalStars(repos) {
     return repos.reduce((sum, r) => sum + r.stargazers_count, 0);
 }
 
-/**
- * リポジトリ配列から総フォーク数を計算する
- */
 function calcTotalForks(repos) {
     return repos.reduce((sum, r) => sum + r.forks_count, 0);
 }
 
-/**
- * 数値を読みやすいフォーマットに変換する（例: 1500 → "1.5k"）
- */
 function formatNumber(n) {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
     return String(n);
 }
 
-/**
- * ISO 8601 日付文字列を「YYYY年MM月」形式に変換する
- */
 function formatJoinDate(isoDate) {
     const d = new Date(isoDate);
     return `${d.getFullYear()}年${d.getMonth() + 1}月 参加`;
@@ -196,9 +367,6 @@ function formatJoinDate(isoDate) {
 // ============================================================
 // UI描画関数
 // ============================================================
-/**
- * プロフィールカードを描画する
- */
 function renderProfile(user) {
     document.getElementById('avatar').src = user.avatar_url;
     document.getElementById('avatar').alt = `${user.login}のアバター`;
@@ -206,7 +374,6 @@ function renderProfile(user) {
     document.getElementById('profile-login').textContent = `@${user.login}`;
     document.getElementById('profile-bio').textContent = user.bio ?? '';
 
-    // メタ情報の設定
     const locationEl = document.getElementById('profile-location');
     if (user.location) {
         locationEl.querySelector('span').textContent = user.location;
@@ -231,9 +398,6 @@ function renderProfile(user) {
     document.getElementById('github-link').href = user.html_url;
 }
 
-/**
- * 統計カードの数値を更新する
- */
 function renderStats(user, repos) {
     const totalStars = calcTotalStars(repos);
     const totalForks = calcTotalForks(repos);
@@ -244,11 +408,6 @@ function renderStats(user, repos) {
     animateCounter('stat-forks', totalForks);
 }
 
-/**
- * 数値カウントアップアニメーションを実行する
- * @param {string} elementId - 対象要素ID
- * @param {number} target - 最終値
- */
 function animateCounter(elementId, target) {
     const el = document.getElementById(elementId);
     const duration = 600;
@@ -265,9 +424,6 @@ function animateCounter(elementId, target) {
     requestAnimationFrame(tick);
 }
 
-/**
- * トップリポジトリカードを描画する
- */
 function renderTopRepos(repos) {
     const repoGrid = document.getElementById('repo-grid');
     repoGrid.innerHTML = '';
@@ -318,9 +474,6 @@ function renderTopRepos(repos) {
     });
 }
 
-/**
- * XSS対策: HTMLエスケープ
- */
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(String(text)));
@@ -330,31 +483,35 @@ function escapeHtml(text) {
 // ============================================================
 // メイン処理
 // ============================================================
-/**
- * GitHubユーザーの統計情報を取得してダッシュボードを表示する
- * @param {string} username - GitHubユーザー名
- */
 async function loadUserStats(username) {
     lastSearchedUsername = username;
     searchBtn.disabled = true;
     showSection('loading');
 
+    // キャッシュ確認
+    const cached = getCached(username);
+    if (cached) {
+        renderAll(cached.user, cached.repos, cached.languages);
+        updatePageUrl(username);
+        showSection('dashboard');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        searchBtn.disabled = false;
+        return;
+    }
+
     try {
-        // プロフィールとリポジトリを並行取得
         const [user, repos] = await Promise.all([
             fetchGitHubAPI(`/users/${username}`),
             fetchAllRepositories(username),
         ]);
-
-        // 言語情報を取得（時間がかかる可能性があるため後続）
         const languages = await fetchAggregatedLanguages(username, repos);
 
-        // UI描画（各セクションを順番に）
-        renderProfile(user);
-        renderStats(user, repos);
-        renderTopRepos(repos);
-        renderLanguageChart(languages);
-        renderActivityChart(repos);
+        // キャッシュ保存
+        setCache(username, { user, repos, languages });
+
+        renderAll(user, repos, languages);
+        saveHistory(username);
+        updatePageUrl(username);
 
         showSection('dashboard');
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -383,7 +540,34 @@ async function loadUserStats(username) {
     }
 }
 
+function renderAll(user, repos, languages) {
+    _currentExportData = { user, repos, languages };
+    renderProfile(user);
+    renderStats(user, repos);
+    renderTopRepos(repos);
+    renderLanguageChart(languages);
+    renderActivityChart(repos);
+
+    // ダッシュボードのユーザー名バッジを更新
+    const dashUser = document.getElementById('dashboard-username');
+    if (dashUser) dashUser.textContent = user.login;
+}
+
 // ============================================================
-// 初期フォーカス
+// URLパラメータからの自動検索
 // ============================================================
+function checkUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    const user = params.get('user');
+    if (user && /^[a-zA-Z0-9_-]{1,39}$/.test(user)) {
+        usernameInput.value = user;
+        loadUserStats(user);
+    }
+}
+
+// ============================================================
+// 初期化
+// ============================================================
+applyTheme(loadTheme());
+checkUrlParams();
 usernameInput.focus();

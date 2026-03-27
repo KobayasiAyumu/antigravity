@@ -25,6 +25,9 @@
         <span class="logo-text">GitHub Stats</span>
       </div>
       <p class="header-sub">GitHubユーザーの活動を可視化する</p>
+      <button class="theme-btn" id="btn-theme" aria-label="テーマ切替">
+        <i class="fa-solid fa-moon"></i>
+      </button>
     </div>
   </header>
 
@@ -54,6 +57,8 @@
             </button>
           </div>
         </form>
+        <!-- 検索履歴ドロップダウン -->
+        <div class="history-dropdown hidden" id="history-dropdown"></div>
         <!-- サジェスト例 -->
         <div class="quick-search">
           <span class="quick-label">例:</span>
@@ -190,10 +195,19 @@
         <div class="repo-grid" id="repo-grid"></div>
       </div>
 
-      <!-- 再検索ボタン -->
-      <div class="back-section">
+      <!-- ダッシュボードアクション -->
+      <div class="dashboard-actions">
+        <button class="action-btn" id="btn-share">
+          <i class="fa-solid fa-share-nodes"></i>
+          <span class="btn-text">シェア</span>
+        </button>
+        <button class="action-btn" id="btn-export">
+          <i class="fa-solid fa-download"></i>
+          <span class="btn-text">JSONエクスポート</span>
+        </button>
         <button class="back-btn" id="back-btn">
-          <i class="fa-solid fa-arrow-left"></i> 別のユーザーを検索
+          <i class="fa-solid fa-arrow-left"></i>
+          <span class="btn-text">別のユーザーを検索</span>
         </button>
       </div>
 
@@ -208,6 +222,9 @@
       <i class="fa-solid fa-heart" style="color: #f85149;"></i> Built with HTML / CSS / JavaScript
     </p>
   </footer>
+
+  <!-- トースト通知コンテナ -->
+  <div class="toast-container" id="toast-container"></div>
 
   <script src="charts.js"></script>
   <script src="app.js"></script>

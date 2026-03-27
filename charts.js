@@ -38,6 +38,14 @@ function getLangColor(lang) {
   return LANGUAGE_COLORS[lang] ?? LANGUAGE_COLORS.default;
 }
 
+/**
+ * 現在のテーマからチャートのborderColorを取得する
+ * @returns {string} CSS変数 --bg-primary の計算値
+ */
+function getChartBgColor() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--bg-primary').trim() || '#0d1117';
+}
+
 // グラフインスタンスを保持（再描画時に破棄するため）
 let languageChartInstance = null;
 let activityChartInstance = null;
@@ -80,14 +88,14 @@ function renderLanguageChart(languages) {
       datasets: [{
         data,
         backgroundColor: colors,
-        borderColor: '#0d1117',
+        borderColor: getChartBgColor(),
         borderWidth: 2,
         hoverBorderWidth: 3,
         hoverOffset: 6,
       }],
     },
     options: {
-      responsive: false,
+      responsive: true,
       cutout: '70%',
       plugins: {
         legend: { display: false },
